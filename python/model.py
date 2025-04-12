@@ -3,23 +3,37 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
+import torch.nn.functional as F
 
 class EloModel(nn.Module):
     def __init__(self, input_size):
         super(EloModel, self).__init__()
-        self.fc1 = nn.Linear(input_size, 128)
-        self.dropout1 = nn.Dropout(0.3)  # Add dropout after first layer
-        self.fc2 = nn.Linear(128, 64)
-        self.dropout2 = nn.Dropout(0.3)  # Add dropout after second layer
-        self.fc3 = nn.Linear(64, 1)
+        self.fc1 = nn.Linear(input_size, 64)
+        self.bn1 = nn.BatchNorm1d(64)  # Add batch normalization
+        self.dropout1 = nn.Dropout(0.3)
+        self.fc2 = nn.Linear(64, 64)
+        self.bn2 = nn.BatchNorm1d(64)   # Add batch normalization
+        self.dropout2 = nn.Dropout(0.3)
+        self.fc3 = nn.Linear(64, 32)
+        self.bn3 = nn.BatchNorm1d(32)   # Add batch normalization
+        self.dropout3 = nn.Dropout(0.3)
+        self.fc4 = nn.Linear(32, 32)     
+        self.bn4 = nn.BatchNorm1d(32)   # Add batch normalization
+        self.fc5 = nn.Linear(32, 1)  # Output layer for Elo rating prediction
+
+
     
     def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = self.dropout1(x)  # Apply dropout
-        x = F.relu(self.fc2(x))
-        x = self.dropout2(x)  # Apply dropout
-        x = self.fc3(x)
+        x = F.relu(self.bn1(self.fc1(x)))
+        x = self.dropout1(x)
+        x = F.relu(self.bn2(self.fc2(x)))
+        x = self.dropout2(x)
+        x = F.relu(self.bn3(self.fc3(x)))
+        x = self.dropout3(x)
+        x = F.relu(self.bn4(self.fc4(x)))
+        x = self.fc5(x)
         return x
+
 
 def train_model(model, train_dataset, val_dataset, hyperparams):
     """
@@ -37,7 +51,7 @@ def train_model(model, train_dataset, val_dataset, hyperparams):
         training_losses (list): List of training losses over epochs.
         validation_losses (list): List of validation losses over epochs.
     """
-    batch_size = hyperparams.get("batch_size", 32)
+    batch_size = hyperparams.get("batch_size", 64)
     epochs = hyperparams.get("epochs", 1000)
     learning_rate = hyperparams.get("learning_rate", 0.001)
     print_every = hyperparams.get("print_every", 10)
@@ -50,14 +64,25 @@ def train_model(model, train_dataset, val_dataset, hyperparams):
     # Apply L2 regularization via weight decay parameter
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=l2_lambda)
     criterion = nn.MSELoss()
+
+    # Implement early stopping
+    patience = hyperparams.get("patience", 40)
+    early_stopping_counter = 0
     
     best_val_loss = float('inf')
     training_losses = []
     validation_losses = []
+    learning_rates = []
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, 'min', factor=0.5, patience=10, verbose=True
+    )
     
     for epoch in tqdm(range(epochs), desc="Training epochs"):
         model.train()
         train_loss_epoch = 0.0
+        current_lr = optimizer.param_groups[0]['lr']
+        learning_rates.append(current_lr)
         for X_batch, y_batch in train_loader:
             optimizer.zero_grad()
             outputs = model(X_batch)
@@ -79,16 +104,27 @@ def train_model(model, train_dataset, val_dataset, hyperparams):
         
         val_loss_epoch /= len(val_loader.dataset)
         validation_losses.append(val_loss_epoch)
+
+        # Step the scheduler based on validation loss
+        scheduler.step(val_loss_epoch)
         
-        if (epoch + 1) % print_every == 0:
-            print(f"Epoch [{epoch+1}/{epochs}], Training Loss: {train_loss_epoch:.4f}, Validation Loss: {val_loss_epoch:.4f}")
+        # if (epoch + 1) % print_every == 0:
+        #     print(f"Epoch [{epoch+1}/{epochs}], LR: {current_lr:.6f}, Training Loss: {train_loss_epoch:.4f}, Validation Loss: {val_loss_epoch:.4f}")
         
         if val_loss_epoch < best_val_loss:
             best_val_loss = val_loss_epoch
             torch.save(model.state_dict(), best_model_path)
-            print(f"Epoch [{epoch+1}]: New best model saved with Validation Loss: {val_loss_epoch:.4f}")
+            #print(f"Epoch [{epoch+1}]: New best model saved with Validation Loss: {val_loss_epoch:.4f}")
+            early_stop_counter = 0  # Reset counter when we find a better model
+        else:
+            early_stop_counter += 1
+            
+        # Early stopping check
+        if early_stop_counter >= patience:
+            print(f"Early stopping triggered after {epoch+1} epochs")
+            break
     
-    return model, training_losses, validation_losses
+    return model, training_losses, validation_losses, learning_rates
 
 def evaluate_model(model, test_dataset, hyperparams):
     """
